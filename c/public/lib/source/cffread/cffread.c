@@ -65,7 +65,7 @@ typedef struct /* INDEX */
     OffSize offSize;     /* Offset size */
     Offset offset;       /* Offset start */
     Offset data;         /* Data start - 1 */
-    unsigned bias;       /* Subr number bias */
+    unsigned short bias;       /* Subr number bias */
 } INDEX;
 
 typedef dnaDCL(long, SubrOffsets); /* Subr charstring offsets */
