@@ -1853,6 +1853,7 @@ static int parseFontInfo(ufoCtx h) {
         } else if (tokenEqualStr(tk, "<dict>")) {
             if (state == 3){
                 state = 5;
+                int i = 0;
                 if (parsingFDArray){
                     if (prevState == 5) {  // NOT first fdict in FDArray
                         currentiFD = currentiFD + 1;
