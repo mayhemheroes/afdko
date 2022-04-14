@@ -1,6 +1,8 @@
 include(ExternalProject)
 cmake_policy(SET CMP0114 NEW)  # Added by iterumllc
 
+message("\n=======ANTLR4: ${CMAKE_CURRENT_BINARY_DIR} ====\n")
+
 # Edits below are for path length or (in the zip download) correctness
 
 set(ANTLR4_ROOT ${CMAKE_CURRENT_BINARY_DIR}/a4/src/a4)  # Edited by iterumllc
@@ -21,6 +23,7 @@ else()
 endif()
 
 if(MSVC)
+  message("MSVC IN ANTLR4\n")
   set(ANTLR4_STATIC_LIBRARIES
       ${ANTLR4_OUTPUT_DIR}/antlr4-runtime-static.lib)
   set(ANTLR4_SHARED_LIBRARIES
