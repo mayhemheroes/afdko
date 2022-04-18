@@ -7,6 +7,6 @@ add_executable(tx
 
 message("\n-----INCLUDE_DIRS: ${LIBXML2_INCLUDE_DIRS} \n")
 
-target_include_directories(tx PRIVATE ../../shared/include ../../shared/resource ../../shared/source/tx_shared ${LIBXML2_INCLUDE_DIRS})
+target_include_directories(tx PRIVATE ../../shared/include ../../shared/resource ../../shared/source/tx_shared ${LIBXML2_INCLUDE_DIRS} ${LIBXML2_AN_INCLUDE_DIRS})
 target_link_libraries(tx PUBLIC tx_shared libxml2)
 install(TARGETS tx DESTINATION bin)

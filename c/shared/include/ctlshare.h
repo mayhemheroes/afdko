@@ -15,8 +15,8 @@
 #endif
 #include <stdint.h>
 
-#include <libxml/tree.h>
-#include <libxml/parser.h>
+#include "libxml/tree.h"
+#include "libxml/parser.h"
 
 /* CoreType Library Shared Definitions
    ===================================

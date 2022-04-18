@@ -1,4 +1,4 @@
-include_directories(../include ../resource ${LIBXML2_INCLUDE_DIRS})
+include_directories(../include ../resource ${LIBXML2_INCLUDE_DIRS} ${LIBXML2_AN_INCLUDE_DIRS})
 
 MACRO(ADD_AFDKOLIB lm)
     file(GLOB sl_sources "${lm}/*")

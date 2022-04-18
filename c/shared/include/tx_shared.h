@@ -59,8 +59,8 @@
 #include <sys/time.h>
 #endif
 
-#include <libxml/tree.h>
-#include <libxml/parser.h>
+#include "libxml/tree.h"
+#include "libxml/parser.h"
 
 /* ----------------------- Miscellaneous Definitions ----------------------- */
 
