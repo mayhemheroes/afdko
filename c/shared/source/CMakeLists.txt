@@ -3,6 +3,9 @@ include_directories(../include ../resource ${LIBXML2_INCLUDE_DIR} ${LIBXML2_INCL
 MACRO(ADD_AFDKOLIB lm)
     file(GLOB sl_sources "${lm}/*")
     add_library(${lm} STATIC ${sl_sources})
+    # add_dependencies(${lm}  libxml2)
+    # target_include_directories(${lm} PUBLIC  ${LIBXML2_INCLUDE_DIR} ${LIBXML2_INCLUDE_DIR_2})
+    # target_link_libraries(${lm} PUBLIC ${LIBXML2_LOCATION})
 ENDMACRO(ADD_AFDKOLIB)
 
 ADD_AFDKOLIB(absfont)
@@ -25,8 +28,8 @@ ADD_AFDKOLIB(t1read)
 ADD_AFDKOLIB(t1write)
 ADD_AFDKOLIB(t2cstr)
 ADD_AFDKOLIB(ttread)
-ADD_AFDKOLIB(tx_shared)
 ADD_AFDKOLIB(uforead)
+ADD_AFDKOLIB(tx_shared)
 ADD_AFDKOLIB(ufowrite)
 ADD_AFDKOLIB(varread)
 
@@ -46,8 +49,10 @@ target_compile_definitions(tx_shared PRIVATE $<$<CONFIG:Debug>:CFW_DEBUG=1>)
 
 # These libraries are partially ordered
 
+# target_link_libraries(tx_shared PUBLIC libxml2)
+
 target_link_libraries(tx_shared PUBLIC
-    libxml2
+    uforead
     cfembed
     cffread
     cffwrite
@@ -64,7 +69,6 @@ target_link_libraries(tx_shared PUBLIC
     t1write
     t2cstr
     ttread
-    uforead
     ufowrite
     pstoken
     t1cstr
@@ -76,3 +80,5 @@ target_link_libraries(tx_shared PUBLIC
 if(HAVE_M_LIB)
     target_link_libraries(tx_shared PUBLIC m)
 endif()
+
+target_link_libraries(tx_shared PUBLIC ${LIBXML2_LOCATION})

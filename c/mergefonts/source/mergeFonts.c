@@ -7,6 +7,9 @@
  */
 
 #include "tx_shared.h"
+#include "libxml/tree.h"
+#include "libxml/parser.h"
+
 
 #define MERGEFONTS_VERSION CTL_MAKE_VERSION(1, 2, 3) /* derived from tx */
 
