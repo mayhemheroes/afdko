@@ -73,6 +73,13 @@ target_link_libraries(tx_shared PUBLIC
     varread
 )
 
+if(WIN32)
+  target_compile_definitions(tx_shared PUBLIC -DLIBXML_STATIC)
+  target_link_libraries(tx_shared PUBLIC wsock32 ws2_32 libxml2)
+else()
+  target_link_libraries(tx_shared PUBLIC libxml2)
+endif()
+
 if(HAVE_M_LIB)
     target_link_libraries(tx_shared PUBLIC m)
 endif()
