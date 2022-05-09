@@ -37,5 +37,4 @@ set_target_properties(libxml2 PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES ${SOURCE_DIR}/include)
 target_include_directories(libxml2 INTERFACE ${SOURCE_DIR}/include INTERFACE ${BINARY_DIR})
 
-set(LIBXML2_INCLUDE_DIR ${SOURCE_DIR}/include)
-set(LIBXML2_INCLUDE_DIR_2 ${BINARY_DIR})
+set(LIBXML2_INCLUDE_DIR ${SOURCE_DIR}/include ${BINARY_DIR})
