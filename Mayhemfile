@@ -1,0 +1,7 @@
+project: rnshah9/afdko
+target: afdko
+tests: null
+
+cmds:
+  - cmd: /repo/build/bin/makeotfexe -f @@
+    filepath: /test.ps
