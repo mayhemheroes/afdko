@@ -1,5 +1,5 @@
 project: rnshah9/afdko
-target: afdko
+target: makeotfexe
 tests: null
 
 cmds:
