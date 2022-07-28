@@ -2,5 +2,4 @@ project: afdko
 target: makeotfexe
 
 cmds:
-  - cmd: /repo/build/bin/makeotfexe -f /test.ps
-    filepath: /test.ps
+  - cmd: /makeotfexe -f @@
