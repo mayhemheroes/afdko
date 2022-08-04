@@ -27,27 +27,27 @@ jobs:
         echo "Reason for triggering: ${{ github.event.inputs.reason }}"
 
     - name: Check out
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
       with:
         fetch-depth: 0  # unshallow fetch for setuptools-scm
 
     - name: Install Python 3.9
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v4
       with:
         python-version: '3.9'
 
     - name: Build wheel (only macosx_universal2)
       if: matrix.os == 'macos-latest'
-      uses: pypa/cibuildwheel@v2.3.1
+      uses: pypa/cibuildwheel@v2.8.1
       with:
         output-dir: dist
       env:
         CIBW_BUILD: "cp39-*"
         CIBW_ARCHS_MACOS: universal2
-        CIBW_ENVIRONMENT_MACOS: "CFLAGS='-arch arm64 -arch x86_64' CXXFLAGS='-arch arm64 -arch x86_64' LDFLAGS='-arch arm64 -arch x86_64'"
+        CIBW_ENVIRONMENT_MACOS: "CFLAGS='-arch arm64 -arch x86_64 -I/usr/include/libxml2' CXXFLAGS='-arch arm64 -arch x86_64' LDFLAGS='-arch arm64 -arch x86_64'"
 
     - name: Build wheel (except macosx_universal2)
-      uses: pypa/cibuildwheel@v2.3.1
+      uses: pypa/cibuildwheel@v2.8.1
       with:
         output-dir: dist
       env:
@@ -57,7 +57,8 @@ jobs:
         CIBW_ARCHS_LINUX: x86_64
         CIBW_MANYLINUX_X86_64_IMAGE: manylinux2014
         CIBW_SKIP: "*musllinux*"
-        CIBW_BEFORE_ALL_LINUX: yum install -y libuuid-devel
+        CIBW_BEFORE_ALL_LINUX: "yum install -y libuuid-devel && yum install -y libxml2-devel"
+        CIBW_ENVIRONMENT_LINUX: "CFLAGS='-I/usr/include/libxml2'"
 
     - name: Build sdist (Ubuntu only)
       if: matrix.os == 'ubuntu-latest'
@@ -67,7 +68,7 @@ jobs:
         python -m build --sdist
 
     - name: Upload build artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       with:
         name: wheelstorage
         path: ./dist/*
@@ -93,7 +94,7 @@ jobs:
       shell: bash
 
     - name: Download release assets
-      uses: actions/download-artifact@v2
+      uses: actions/download-artifact@v3
       with:
         name: wheelstorage
         path: dist

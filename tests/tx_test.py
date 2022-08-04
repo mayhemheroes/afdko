@@ -1215,3 +1215,173 @@ def test_non_FDArray_dict_parse():
     ufo_input_path = get_input_path("nonCIDKeyed_nonFDArrayDict.ufo")
     arg = [TOOL, '-t1', '-f', ufo_input_path]
     assert subprocess.call(arg) == 0
+
+
+@pytest.mark.parametrize('file, msg, ret_code', [
+    ("empty-key-name", b'', 0),
+    ("empty-key-name-fdarray", b'', 0),
+    ("invalid-key-name", b'', 0),
+    ("missing-key-name", b'', 0),
+    ("missing-key-name-2", b'', 0),
+    ("empty-key-value", b'', 0),
+    ("missing-key-value", b'', 0),
+    ("missing-key-value-2", b'', 0),
+    ("bluesarray-string", b'', 0),
+    ("fontmatrix-string", b'', 0),
+    ("switched-string-and-array", b'', 0),
+    ("empty-dict", b'', 0)
+])
+def test_ufo_fontinfo_parsing(file, msg, ret_code):
+    folder = "ufo-fontinfo-parsing/"
+    ufo_input_path = get_input_path(folder + file + ".ufo")
+    expected_path = get_expected_path(folder + file + ".subset")
+    output_path = get_temp_file_path()
+    arg = CMD + ['-s', '-e', '-a', '-o', 't1', '-f',
+                 ufo_input_path, output_path]
+    stderr_path = runner(arg)
+    with open(stderr_path, 'rb') as f:
+        output = f.read()
+    assert (msg) in output
+    if (ret_code == 0):
+        expected_path = generate_ps_dump(expected_path)
+        output_path = generate_ps_dump(output_path)
+        assert differ([expected_path, output_path])
+    else:
+        arg = [TOOL, '-t1', '-f', ufo_input_path]
+        assert subprocess.call(arg) == 6
+
+
+def test_unknown_fontinfoplist_key_bug1467():
+    """
+    Tests a UFO with an unknown key and an <array> value in fontinfo.plist.
+    The previous implementation of fontinfo.plist parsing would cause a crash
+    in this scenario. The switch to the libxml2 implementation resolves this.
+    """
+    input_path = get_input_path("bug1467_unknown_key_array.ufo")
+    expected_path = get_expected_path("bug1467_unknown_key_array.txt")
+    stdout_path = runner(CMD + ['-s', '-o', 'dump', '0', '-f', input_path])
+    assert differ([expected_path, stdout_path, '-l', '1'])
+
+
+def test_unknown_fontinfoplist_key_bug1396():
+    """
+    Tests a UFO with an unknown key and a <string> value in fontinfo.plist.
+    Related to bug 1467.
+    The previous implementation of fontinfo.plist parsing would cause a crash
+    in this scenario. The switch to the libxml2 implementation resolves this.
+    """
+    input_path = get_input_path("bug1396_unknown_key_string.ufo")
+    arg = [TOOL, '-t1', '-f', input_path]
+    assert subprocess.call(arg) == 0
+
+
+libplist_warn = (b"tx: (ufr) Warning: Unable to open "
+                 b"lib.plist in source UFO font.")
+
+
+@pytest.mark.parametrize('file, msg, ret_code', [
+    ("missing-libplist-namekeyed", libplist_warn, 0),
+    ("missing-libplist-cidkeyed", libplist_warn, 0),
+    ("missing-libplist-cidkeyed-cid-identifiers", None, 6)
+])
+def test_missing_ufo_libplist_bug1306(file, msg, ret_code):
+    """
+    if reading namekeyed or cidkeyed UFO:
+        tx should not fail if optional lib.plist is not found.
+        Instead, warn the user.
+    if reading cidkeyed UFO with cid identifiers in glyphs:
+        tx later fails as it expects values for
+        Registry, Ordering, Supplement and CIDFontName keys,
+        which should be defined in lib.plist
+    """
+    folder = "ufo-libplist-parsing/"
+    input_path = get_input_path(folder + file + ".ufo")
+    stdout_path = runner(CMD + ['-s', '-e', '-o', 't1', '-f',
+                         input_path])
+    with open(stdout_path, 'rb') as f:
+        output = f.read()
+
+    if msg is None:
+        # msg is in a file in expected_output
+        expected_path = get_expected_path(file + ".txt")
+        with open(expected_path, 'rb') as expected_msg:
+            msg = expected_msg.read()
+    assert msg in output
+
+    assert subprocess.call([TOOL, '-t1', '-f', input_path]) == ret_code
+
+
+glyphorder_warn = (b'tx: (ufr) Warning: public.glyphOrder key is empty'
+                   b' and does not contain glyph name for all 5 glyphs.'
+                   b' Consider defining this in lib.plist.')
+
+
+@pytest.mark.parametrize('file, msg, ret_code', [
+    ("normal", b'', 0),
+    ("empty-dict", glyphorder_warn, 0),
+    ("empty-key-name", glyphorder_warn, 0),
+    ("empty-key-value", glyphorder_warn, 0),
+])
+def test_ufo_libplist_parsing(file, msg, ret_code):
+    folder = "ufo-libplist-parsing/"
+    ufo_input_path = get_input_path(folder + file + ".ufo")
+    expected_path = get_expected_path(folder + file + ".pfa")
+    output_path = get_temp_file_path()
+    arg = CMD + ['-s', '-e', '-a', '-o', 't1', '-f',
+                 ufo_input_path, output_path]
+    stderr_path = runner(arg)
+    with open(stderr_path, 'rb') as f:
+        output = f.read()
+    assert (msg) in output
+    if (ret_code == 0):
+        expected_path = generate_ps_dump(expected_path)
+        output_path = generate_ps_dump(output_path)
+        assert differ([expected_path, output_path])
+    else:
+        arg = [TOOL, '-t1', '-f', ufo_input_path]
+        assert subprocess.call(arg) == 6
+
+
+def test_ufo_underline_writing_bug1534():
+    """
+    Tests that ufowrite writes correct values (with new rounding)
+    for postscriptUnderlinePosition and postscriptUnderlineThickness.
+    """
+    input_path = get_input_path("underline.otf")
+    expected_path = get_expected_path("bug1534.ufo")
+    output_path = get_temp_dir_path("bug1534.ufo")
+    arg = [TOOL, '-ufo', '-o', output_path, input_path]
+    subprocess.call(arg)
+    assert differ([expected_path, output_path])
+
+
+glyph_not_in_dflt_warn = (b"tx: (ufr) Warning: glyph 'foo' is"
+                          b" in the processed layer but not in"
+                          b" the default layer.")
+
+
+@pytest.mark.parametrize('file, msg, ret_code', [
+    ("wrong-keyname-type", b'', 0),
+    ("wrong-keyvalue-type-dict", b'', 0),
+    ("wrong-keyvalue-type-int", b'', 0),
+    ("not-in-default", glyph_not_in_dflt_warn, 0),
+    ("missing-glif-file", b'', 0),
+])
+def test_ufo_contentsplist_parsing(file, msg, ret_code):
+    folder = "ufo-contentsplist-parsing/"
+    ufo_input_path = get_input_path(folder + file + ".ufo")
+    expected_path = get_expected_path(folder + file + ".pfa")
+    output_path = get_temp_file_path()
+    arg = CMD + ['-s', '-e', '-a', '-o', 't1', '-f',
+                 ufo_input_path, output_path]
+    stderr_path = runner(arg)
+    with open(stderr_path, 'rb') as f:
+        output = f.read()
+    assert (msg) in output
+    if (ret_code == 0):
+        expected_path = generate_ps_dump(expected_path)
+        output_path = generate_ps_dump(output_path)
+        assert differ([expected_path, output_path])
+    else:
+        arg = [TOOL, '-t1', '-f', ufo_input_path]
+        assert subprocess.call(arg) == 6

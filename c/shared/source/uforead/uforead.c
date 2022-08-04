@@ -39,13 +39,18 @@
 #include <ctype.h>
 #include <math.h>
 #include <float.h>
-#include <stdbool.h>
 
 enum {
     ufoUnknown,
     ufoNumeric,
     ufoOperator,
     ufoNotSet,
+};
+
+enum contentsParsingState{
+    None,
+    parsingDefaultLayer,
+    parsingAltLayer
 };
 
 #define kMaxToken 1024
@@ -58,6 +63,9 @@ long CIDCount = 0;
 int currentiFD = 0;
 int FDArrayInitSize = 50;
 bool parsingFDArray = false;
+bool parsingValueArray = false;
+enum contentsParsingState parsingContentsLayer = None;
+
 
 typedef struct
 {
@@ -288,6 +296,12 @@ static long getWidth(ufoCtx h, STI sti);
 static int addChar(ufoCtx h, STI sti, Char** chr);
 static int CTL_CDECL postMatchChar(const void* key, const void* value,
                                    void* ctx);
+static void addGLIFRec(ufoCtx h, char* keyName, char* keyValue);
+static void updateGLIFRec(ufoCtx h, char* glyphName, char* fileName);
+static int parseXMLFile(ufoCtx h, char* filename, const char* filetype);
+static char* parseXMLKeyName(ufoCtx h, xmlNodePtr cur);
+static char* parseXMLKeyValue(ufoCtx h, xmlNodePtr cur);
+static bool setFontDictKey(ufoCtx h, char* keyName, xmlNodePtr cur);
 
 /* -------------------------- Error Support ------------------------ */
 
@@ -406,6 +420,10 @@ void ufoFree(ufoCtx h) {
     dnaFREE(h->data.opList);
     freeStrings(h);
     dnaFree(h->dna);
+
+    if (h->top.FDArray.array != &h->fdict){  // if more memory was allocated for FDArray
+        memFree(h, h->top.FDArray.array);
+    }
 
     /* Close debug stream */
     if (h->stm.dbg != NULL)
@@ -923,204 +941,258 @@ static char* getKeyValue(ufoCtx h, char* endName, int state) {
     return value;
 }
 
-static void setBluesArrayValue(ufoCtx h, BluesArray* bluesArray, int numElements) {
+/* free dynamic valueArray and set cnt to 0 */
+static void freeValueArray(ufoCtx h){
+    if (h->valueArray.cnt != 0){
+        int i = 0;
+        while ((i < h->valueArray.cnt)) {
+            memFree(h, h->valueArray.array[i]);
+            i++;
+        }
+        dnaSET_CNT(h->valueArray, 0);
+    }
+    parsingValueArray = false;
+}
+
+/* ToDo: add extra warnings for verbose-output */
+static void setGlifOrderArray(ufoCtx h, char* arrayKeyName) {
     int i = 0;
+    if (h->valueArray.cnt == 0) {
+//        message(h, "Warning: Encountered empty or invalid array for %s. Skipping", arrayKeyName);
+        return;
+    }
+    while ((i < h->valueArray.cnt)) {
+        GlIFOrderRec* newGLIFOrderRec;
+        newGLIFOrderRec = dnaNEXT(h->data.glifOrder);
+        newGLIFOrderRec->glyphName = copyStr(h, h->valueArray.array[i]);
+        newGLIFOrderRec->order = h->data.glifOrder.cnt - 1;
+        i++;
+    }
+    freeValueArray(h);
+}
+
+/* ToDo: add extra warnings for verbose-output */
+static void setBluesArrayValue(ufoCtx h, BluesArray* bluesArray, int numElements, char* arrayKeyName) {
+    int i = 0;
+    if (h->valueArray.cnt == 0) {
+//        message(h, "Warning: Encountered empty or invalid array for %s. Skipping", arrayKeyName);
+        return;
+    }
     bluesArray->cnt = h->valueArray.cnt;
     while ((i < h->valueArray.cnt) && (i < numElements)) {
         bluesArray->array[i] = (float)atof(h->valueArray.array[i]);
-        memFree(h, h->valueArray.array[i]);
         i++;
     }
+    freeValueArray(h);
 }
 
+/* ToDo: add extra warnings for verbose-output */
 static void setFontMatrix(ufoCtx h, abfFontMatrix* fontMatrix, int numElements) {
     int i = 0;
+    if (h->valueArray.cnt == 0) {
+//        message(h, "Warning: Encountered empty or invalid array for FontMatrix. Skipping");
+        return;
+    }
     fontMatrix->cnt = h->valueArray.cnt;
     while ((i < h->valueArray.cnt) && (i < numElements)) {
         fontMatrix->array[i] = (float)atof(h->valueArray.array[i]);
-        memFree(h, h->valueArray.array[i]);
         i++;
     }
+    freeValueArray(h);
 }
 
-static void setFontDictKey(ufoCtx h, char* keyValue) {
-    char* keyName = h->parseKeyName;
+/* ToDo: add extra warnings for verbose-output */
+static bool keyValueValid(ufoCtx h, xmlNodePtr cur, char* keyValue, char* keyName){
+    bool valid = true;
+    if (keyValue == NULL) {
+        if (!parsingValueArray)
+            valid = false;
+//            message(h, "Warning: Encountered missing value for fontinfo key %s. Skipping", keyName);
+        else if (parsingValueArray && h->valueArray.cnt == 0)
+            valid = false;
+//            message(h, "Warning: Encountered empty <%s> for fontinfo key %s. Skipping", cur->name, keyName);
+    } else {
+        if (!strcmp(keyValue, "")){
+//        message(h, "Warning: Encountered empty <%s> for fontinfo key %s. Skipping", cur->name, keyName);
+        valid = false;
+        }
+    }
+    if (!valid)
+        freeValueArray(h);  /* we free h->valueArray after parsing every key to clean up any leftover/invalid data */
+
+    return valid;
+}
+
+static bool setFontDictKey(ufoCtx h, char* keyName, xmlNodePtr cur) {
+    /* returns false when current key is NULL/ not parseable,
+       otherwise returns true */
     abfTopDict* top = &h->top;
     abfFontDict* fd = h->top.FDArray.array + currentiFD;
     abfPrivateDict* pd = &fd->Private;
     BluesArray* bluesArray;
     abfFontMatrix* fontMatrix;
 
-    /* If we do not use a keyValue, we need to dispose of it
-     */
-    if (!strcmp(keyName, "copyright")) {
-        top->Copyright.ptr = keyValue;
-    } else if (!strcmp(keyName, "trademark")) {
-        char* copySymbol;
-        top->Notice.ptr = keyValue;
-        /* look for the (c) symbol U+00A9, which is 0xC2, 0xA9 in UTF-8 */
-        copySymbol = strstr(keyValue, "\xC2\xA9");
-        if (copySymbol != NULL) {
-            /* if there is a copyright symbol (U+00A9),
-               replace it with the word "Copyright" */
-            char* cpy = "Copyright";
-            char* newString = memNew(h, strlen(cpy) + strlen(keyValue) + 2);
-            /* set the 0xC2 to NULL to terminate the left side of the string */
-            *copySymbol = '\0';
-            /* use copySymbol + 2 to skip the NULL and the 0xA9
-               to get the right side of the string */
-            sprintf(newString, "%s%s%s", keyValue, "Copyright", copySymbol + 2);
-            top->Notice.ptr = newString;
-        }
-    } else if (!strcmp(keyName, "versionMajor")) {
-        if (top->version.ptr == NULL)
-            top->version.ptr = keyValue;
-        else {
-            char* newString = memNew(h, strlen(top->version.ptr) + strlen(keyValue) + 2);
-            sprintf(newString, "%s.%s", keyValue, top->version.ptr);
-            memFree(h, top->version.ptr);
-            top->version.ptr = newString;
-            memFree(h, keyValue);
-        }
-    } else if (!strcmp(keyName, "versionMinor")) {
-        if (top->version.ptr == NULL)
-            top->version.ptr = keyValue;
-        else {
-            char* newString = memNew(h, strlen(top->version.ptr) + strlen(keyValue) + 2);
-            sprintf(newString, "%s.%s", top->version.ptr, keyValue);
-            memFree(h, top->version.ptr);
-            top->version.ptr = newString;
-            memFree(h, keyValue);
-        }
-    } else if (!strcmp(keyName, "postscriptFontName")) {
-        fd->FontName.ptr = keyValue;
-    } else if (!strcmp(keyName, "openTypeNamePreferredFamilyName")) {
-        top->FamilyName.ptr = keyValue;
-    } else if (!strcmp(keyName, "familyName")) {
-        if (top->FamilyName.ptr == NULL)  // we don't re-set this if it was set by "openTypeNamePreferredFamilyName"
+    if (keyName == NULL){
+        return false;
+    }
+    if (!strcmp(keyName, "postscriptFDArray")) {
+        h->top.FDArray.array = memNew(h, FDArrayInitSize *sizeof(abfFontDict));
+        if (h->top.version.ptr != NULL)
+            h->top.cid.CIDFontVersion = atoi(h->top.version.ptr) % 10 + (float) atoi(&h->top.version.ptr[2])/1000;
+        abfInitFontDict(h->top.FDArray.array);
+
+        parsingFDArray = true;
+        currentiFD = -1;
+        parseXMLKeyValue(h, cur);
+        parsingFDArray = false;
+    } else if (!strcmp(keyName, "PrivateDict")) {
+        parsingFDArray = false;  // this is only set when parsing root of FDArray, not sub-dicts within a dict
+        parseXMLKeyValue(h, cur);
+        parsingFDArray = true;
+    } else {
+        char* keyValue = parseXMLKeyValue(h, cur);
+        if (!keyValueValid(h, cur, keyValue, keyName))
+            return false;
+
+        if (parsingContentsLayer == parsingDefaultLayer) {
+            addGLIFRec(h, keyName, keyValue);
+        } else if (parsingContentsLayer == parsingAltLayer) {
+            updateGLIFRec(h, keyName, keyValue);
+        } else if (!strcmp(keyName, "copyright")) {
+            top->Copyright.ptr = keyValue;
+        } else if (!strcmp(keyName, "trademark")) {
+            char* copySymbol;
+            top->Notice.ptr = keyValue;
+            /* look for the (c) symbol U+00A9, which is 0xC2, 0xA9 in UTF-8 */
+            copySymbol = strstr(keyValue, "\xC2\xA9");
+            if (copySymbol != NULL) {
+                /* if there is a copyright symbol (U+00A9),
+                   replace it with the word "Copyright" */
+                char* cpy = "Copyright";
+                char* newString = memNew(h, strlen(cpy) + strlen(keyValue) + 2);
+                /* set the 0xC2 to NULL to terminate the left side of the string */
+                *copySymbol = '\0';
+                /* use copySymbol + 2 to skip the NULL and the 0xA9
+                   to get the right side of the string */
+                sprintf(newString, "%s%s%s", keyValue, "Copyright", copySymbol + 2);
+                top->Notice.ptr = newString;
+            }
+        } else if (!strcmp(keyName, "versionMajor")) {
+            if (top->version.ptr == NULL)
+                top->version.ptr = keyValue;
+            else {
+                char* newString = memNew(h, strlen(top->version.ptr) + strlen(keyValue) + 2);
+                sprintf(newString, "%s.%s", keyValue, top->version.ptr);
+                memFree(h, top->version.ptr);
+                top->version.ptr = newString;
+            }
+        } else if (!strcmp(keyName, "versionMinor")) {
+            if (top->version.ptr == NULL)
+                top->version.ptr = keyValue;
+            else {
+                char* newString = memNew(h, strlen(top->version.ptr) + strlen(keyValue) + 2);
+                sprintf(newString, "%s.%s", top->version.ptr, keyValue);
+                memFree(h, top->version.ptr);
+                top->version.ptr = newString;
+            }
+        } else if (!strcmp(keyName, "postscriptFontName")) {
+            fd->FontName.ptr = keyValue;
+        } else if (!strcmp(keyName, "openTypeNamePreferredFamilyName")) {
             top->FamilyName.ptr = keyValue;
-        else
-            memFree(h, keyValue);
-    } else if (!strcmp(keyName, "postscriptFullName")) {
-        top->FullName.ptr = keyValue;
-    } else if (!strcmp(keyName, "postscriptWeightName")) {
-        top->Weight.ptr = keyValue;
-    } else if (!strcmp(keyName, "postscriptIsFixedPitch")) {
-        top->isFixedPitch = atol(keyValue);
-    } else if (!strcmp(keyName, "FSType")) {
-        top->FSType = atoi(keyValue);
-    } else if (!strcmp(keyName, "italicAngle")) {
-        top->ItalicAngle = (float)strtod(keyValue, NULL);
-    } else if (!strcmp(keyName, "postscriptUnderlinePosition")) {
-        top->UnderlinePosition = (float)strtod(keyValue, NULL);
-    } else if (!strcmp(keyName, "postscriptUnderlineThickness")) {
-        top->UnderlineThickness = (float)strtod(keyValue, NULL);
-    } else if (!strcmp(keyName, "unitsPerEm")) {
-        double ppem = strtod(keyValue, NULL);
-        top->sup.UnitsPerEm = (int)ppem;
-        fd->FontMatrix.cnt = 6;
-        fd->FontMatrix.array[0] = (float)(1.0 / ppem);
-        fd->FontMatrix.array[1] = 0;
-        fd->FontMatrix.array[2] = 0;
-        fd->FontMatrix.array[3] = (float)(1.0 / ppem);
-        fd->FontMatrix.array[4] = 0;
-        fd->FontMatrix.array[5] = 0;
-        memFree(h, keyValue);
-    } else if (!strcmp(keyName, "FontName")) {
-        fd->FontName.ptr = keyValue;
-    } else if (!strcmp(keyName, "PaintType")) {
-        fd->PaintType = atoi(keyValue);
-    } else if (!strcmp(keyName, "FontMatrix")) {
-        fontMatrix = &fd->FontMatrix;
-        setFontMatrix(h, fontMatrix, 6);
-    } else if (!strcmp(keyName, "postscriptBlueFuzz")) {
-        pd->BlueFuzz = (float)strtod(keyValue, NULL);
-        memFree(h, keyValue);
-    } else if (!strcmp(keyName, "postscriptBlueShift")) {
-        pd->BlueShift = (float)strtod(keyValue, NULL);
-        memFree(h, keyValue);
-    } else if (!strcmp(keyName, "postscriptBlueScale")) {
-        pd->BlueScale = (float)strtod(keyValue, NULL);
-        memFree(h, keyValue);
-    } else if (!strcmp(keyName, "postscriptForceBold")) {
-        pd->ForceBold = atol(keyValue);
-    } else if (!strcmp(keyName, "postscriptBlueValues")) {
-        bluesArray = (BluesArray*)&pd->BlueValues;
-        setBluesArrayValue(h, bluesArray, 14);
-    } else if (!strcmp(keyName, "postscriptOtherBlues")) {
-        bluesArray = (BluesArray*)&pd->OtherBlues;
-        setBluesArrayValue(h, bluesArray, 10);
-    } else if (!strcmp(keyName, "postscriptFamilyBlues")) {
-        bluesArray = (BluesArray*)&pd->FamilyBlues;
-        setBluesArrayValue(h, bluesArray, 14);
-    } else if (!strcmp(keyName, "postscriptFamilyOtherBlues")) {
-        bluesArray = (BluesArray*)&pd->FamilyOtherBlues;
-        setBluesArrayValue(h, bluesArray, 10);
-    } else if (!strcmp(keyName, "postscriptStdHW")) {
-        if (keyValue != NULL){
-            pd->StdHW = (float)strtod(keyValue, NULL);
-            memFree(h, keyValue);
-        } else {
-            pd->StdHW = (float)strtod(h->valueArray.array[0], NULL);
-            memFree(h, h->valueArray.array[0]);
+        } else if (!strcmp(keyName, "familyName")) {
+            if (top->FamilyName.ptr == NULL)  // we don't re-set this if it was set by "openTypeNamePreferredFamilyName"
+                top->FamilyName.ptr = keyValue;
+        } else if (!strcmp(keyName, "postscriptFullName")) {
+            top->FullName.ptr = keyValue;
+        } else if (!strcmp(keyName, "postscriptWeightName")) {
+            top->Weight.ptr = keyValue;
+        } else if (!strcmp(keyName, "postscriptIsFixedPitch")) {
+            top->isFixedPitch = atol(keyValue);
+        } else if (!strcmp(keyName, "FSType")) {
+            top->FSType = atoi(keyValue);
+        } else if (!strcmp(keyName, "italicAngle")) {
+            top->ItalicAngle = (float)strtod(keyValue, NULL);
+        } else if (!strcmp(keyName, "postscriptUnderlinePosition")) {
+            top->UnderlinePosition = (float)strtod(keyValue, NULL);
+        } else if (!strcmp(keyName, "postscriptUnderlineThickness")) {
+            top->UnderlineThickness = (float)strtod(keyValue, NULL);
+        } else if (!strcmp(keyName, "unitsPerEm")) {
+            double ppem = strtod(keyValue, NULL);
+            top->sup.UnitsPerEm = (int)ppem;
+            fd->FontMatrix.cnt = 6;
+            fd->FontMatrix.array[0] = (float)(1.0 / ppem);
+            fd->FontMatrix.array[1] = 0;
+            fd->FontMatrix.array[2] = 0;
+            fd->FontMatrix.array[3] = (float)(1.0 / ppem);
+            fd->FontMatrix.array[4] = 0;
+            fd->FontMatrix.array[5] = 0;
+        } else if (!strcmp(keyName, "FontName")) {
+            fd->FontName.ptr = keyValue;
+        } else if (!strcmp(keyName, "PaintType")) {
+            fd->PaintType = atoi(keyValue);
+        } else if (!strcmp(keyName, "FontMatrix")) {
+            fontMatrix = &fd->FontMatrix;
+            setFontMatrix(h, fontMatrix, 6);
+        } else if (!strcmp(keyName, "postscriptBlueFuzz")) {
+            pd->BlueFuzz = (float)strtod(keyValue, NULL);
+        } else if (!strcmp(keyName, "postscriptBlueShift")) {
+            pd->BlueShift = (float)strtod(keyValue, NULL);
+        } else if (!strcmp(keyName, "postscriptBlueScale")) {
+            pd->BlueScale = (float)strtod(keyValue, NULL);
+        } else if (!strcmp(keyName, "postscriptForceBold")) {
+            pd->ForceBold = atol(keyValue);
+        } else if (!strcmp(keyName, "postscriptBlueValues")) {
+            bluesArray = (BluesArray*)&pd->BlueValues;
+            setBluesArrayValue(h, bluesArray, 14, keyName);
+        } else if (!strcmp(keyName, "postscriptOtherBlues")) {
+            bluesArray = (BluesArray*)&pd->OtherBlues;
+            setBluesArrayValue(h, bluesArray, 10, keyName);
+        } else if (!strcmp(keyName, "postscriptFamilyBlues")) {
+            bluesArray = (BluesArray*)&pd->FamilyBlues;
+            setBluesArrayValue(h, bluesArray, 14, keyName);
+        } else if (!strcmp(keyName, "postscriptFamilyOtherBlues")) {
+            bluesArray = (BluesArray*)&pd->FamilyOtherBlues;
+            setBluesArrayValue(h, bluesArray, 10, keyName);
+        } else if (!strcmp(keyName, "postscriptStdHW")) {
+            if (keyValue != NULL) {
+                pd->StdHW = (float)strtod(keyValue, NULL);
+            } else {
+                pd->StdHW = (float)strtod(h->valueArray.array[0], NULL);
+                freeValueArray(h);
+            }
+        } else if (!strcmp(keyName, "postscriptStdVW")) {
+            if (keyValue != NULL) {
+                pd->StdVW = (float)strtod(keyValue, NULL);
+            } else {
+                pd->StdVW = (float)strtod(h->valueArray.array[0], NULL);
+                freeValueArray(h);
+            }
+        } else if (!strcmp(keyName, "postscriptStemSnapH")) {
+            bluesArray = (BluesArray*)&pd->StemSnapH;
+            setBluesArrayValue(h, bluesArray, 12, keyName);
+        } else if (!strcmp(keyName, "postscriptStemSnapV")) {
+            bluesArray = (BluesArray*)&pd->StemSnapV;
+            setBluesArrayValue(h, bluesArray, 12, keyName);
+        } else if (!strcmp(keyName, "LanguageGroup")) {
+            pd->LanguageGroup = (float)strtod(keyValue, NULL);
+            h->parseKeyName = NULL;
+        } else if (!strcmp(keyName, "ExpansionFactor")) {
+            pd->ExpansionFactor = (float)strtod(keyValue, NULL);
+            h->parseKeyName = NULL;
+        } else if (!strcmp(keyName, "public.glyphOrder")) {
+            setGlifOrderArray(h, keyName);
+        } else if (!strcmp(keyName, "com.adobe.type.cid.CIDFontName")) {
+            top->cid.CIDFontName.ptr = copyStr(h, keyValue);
+        } else if (!strcmp(keyName, "com.adobe.type.cid.Registry")) {
+            top->cid.Registry.ptr = copyStr(h, keyValue);
+        } else if (!strcmp(keyName, "com.adobe.type.cid.Ordering")) {
+            top->cid.Ordering.ptr = copyStr(h, keyValue);
+        } else if (!strcmp(keyName, "com.adobe.type.cid.Supplement")) {
+            top->cid.Supplement = atol(copyStr(h, keyValue));
         }
-    } else if (!strcmp(keyName, "postscriptStdVW")) {
-        if (keyValue != NULL){
-            pd->StdVW = (float)strtod(keyValue, NULL);
-            memFree(h, keyValue);
-        } else {
-            pd->StdVW = (float)strtod(h->valueArray.array[0], NULL);
-            memFree(h, h->valueArray.array[0]);
-        }
-    } else if (!strcmp(keyName, "postscriptStemSnapH")) {
-        bluesArray = (BluesArray*)&pd->StemSnapH;
-        setBluesArrayValue(h, bluesArray, 12);
-    } else if (!strcmp(keyName, "postscriptStemSnapV")) {
-        bluesArray = (BluesArray*)&pd->StemSnapV;
-        setBluesArrayValue(h, bluesArray, 12);
-    } else if (!strcmp(keyName, "LanguageGroup")) {
-        pd->LanguageGroup = (float)strtod(keyValue, NULL);
-        h->parseKeyName = NULL;
-        memFree(h, keyValue);
-    } else if (!strcmp(keyName, "ExpansionFactor")) {
-        pd->ExpansionFactor = (float)strtod(keyValue, NULL);
-        h->parseKeyName = NULL;
-        memFree(h, keyValue);
-    } else {
-        // if it isn't used, free the string.
-        memFree(h, keyValue);
+        freeValueArray(h);
     }
-}
-
-static int doFontDictValue(ufoCtx h, char* keyName, char* endKeyName, int state) {
-    char* valueString = getKeyValue(h, endKeyName, state);
-    if (valueString == NULL) {
-        if (strcmp(h->parseKeyName, "styleName")) {
-            message(h, "Warning: Encountered empty %s for fontinfo key %s. Skipping", keyName, h->parseKeyName);
-            /* It is valid and common for styleName can be present and empty, when the style is "Regular".*/
-        }
-    }
-
-    if (state == 2)  // we are processing a key value.
-    {
-        if (valueString != NULL)
-            setFontDictKey(h, valueString);
-        state = 1;
-        memFree(h, h->parseKeyName);
-    } else if (state == 3)  // we are within an <array>, which is a key value
-    {
-        if (valueString != NULL)
-            *dnaNEXT(h->valueArray) = valueString;
-    } else if (state >= 5)  // we are within a <dict> within an <array> (an fDict in an FDArray), which is a key value
-    {
-        if (valueString != NULL) {
-            setFontDictKey(h, valueString);
-        }
-    } else {
-        memFree(h, h->parseKeyName);
-        fatal(h, ufoErrParse, "Encountered key value when not after <key> or <array> element. Text: '%s'.", getBufferContextPtr(h));
-    }
-    return state;
+    return true;
 }
 
 static int CTL_CDECL cmpOrderRecs(const void* first, const void* second, void* ctx) {
@@ -1169,16 +1241,15 @@ static long getGlyphOrderIndex(ufoCtx h, char* glyphName) {
     return orderIndex;
 }
 
-static void addGLIFRec(ufoCtx h, int state) {
-    char* fileName;
+static void addGLIFRec(ufoCtx h, char* glyphName, char* fileName) {
     GLIF_Rec* newGLIFRec;
-    long int glyphOrder;
+    long int glyphOrder = ABF_UNSET_INT;
 
-    glyphOrder = getGlyphOrderIndex(h, h->parseKeyName);
+    if (h->data.glifOrder.cnt != 0)  /* only try to get glyphOrderIndex if cnt > 0 */
+        glyphOrder = getGlyphOrderIndex(h, glyphName);
     newGLIFRec = dnaNEXT(h->data.glifRecs);
-    newGLIFRec->glyphName = h->parseKeyName;
+    newGLIFRec->glyphName = glyphName;
     newGLIFRec->glyphOrder = glyphOrder;
-    fileName = getKeyValue(h, "</string>", state);
     if (fileName == NULL) {
         fatal(h, ufoErrParse, "Encountered glyph reference in contents.plist with an empty file path. Text: '%s'.", getBufferContextPtr(h));
     }
@@ -1201,23 +1272,17 @@ static int findGLIFRecByName(ufoCtx h, char *glyphName)
     return -1;
 }
 
-static void updateGLIFRec(ufoCtx h, int state) {
+static void updateGLIFRec(ufoCtx h, char* glyphName, char* fileName) {
     int index;
-    char *glyphName;
-
-    glyphName = h->parseKeyName;
 
     index = findGLIFRecByName(h, glyphName);
     if (index == -1) {
         message(h, "Warning: glyph '%s' is in the processed layer but not in the default layer.", glyphName);
-        getKeyValue(h, "</string>", state); /* consume the file name */
     } else {
-        char* fileName;
         GLIF_Rec* glifRec;
 
         glifRec = &h->data.glifRecs.array[index];
 
-        fileName = getKeyValue(h, "</string>", state);
         if (fileName == NULL) {
             fatal(h, ufoErrParse, "Encountered glyph reference in alternate layer's contents.plist with an empty file path. Text: '%s'.", getBufferContextPtr(h));
         }
@@ -1237,152 +1302,19 @@ static void updateGLIFRec(ufoCtx h, int state) {
 #define CIDNAME 1255
 
 static int parseGlyphOrder(ufoCtx h) {
-    int state = 0; /* 0 == start, 1= seen start of glyph, 2 = seen glyph name, 3 = in path, 4 in comment.  */
-    int seenGO = 0;
-    int prevState = 0;
-    h->src.next = h->mark = NULL;
+    const char* filetype = "plist";
 
+    h->src.next = h->mark = NULL;
     h->cb.stm.clientFileName = "lib.plist";
     h->stm.src = h->cb.stm.open(&h->cb.stm, UFO_SRC_STREAM_ID, 0);
     if (h->stm.src == NULL || h->cb.stm.seek(&h->cb.stm, h->stm.src, 0)) {
-        fprintf(stderr, "Failed to read lib.plist\n");
-        return ufoErrSrcStream;
+        message(h, "Warning: Unable to open lib.plist in source UFO font.");
+        return ufoSuccess;
     }
-    abfTopDict* top = &h->top;
 
     dnaSET_CNT(h->valueArray, 0);
-    fillbuf(h, 0);
-    /* Read in file, then sort by glyph name */
 
-    while (!(seenGO || (h->flags & SEEN_END))) {
-        token* tk;
-        tk = getToken(h, state);
-
-        if (tk == NULL)
-            break;
-
-        if (tokenEqualStr(tk, "<!--")) {
-            prevState = state;
-            state = IN_COMMENT;
-        } else if (tokenEqualStr(tk, "-->")) {
-            if (state != IN_COMMENT)
-                fatal(h, ufoErrParse, "Encountered end comment token while not in comment.");
-            state = prevState;
-        } else if (state == IN_COMMENT) {
-            continue;
-        } else if (tokenEqualStrN(tk, "<dict", 5)) {
-            // <dict/> case
-            if ((tk->val[tk->length - 2] == '/') && (tk->val[tk->length - 1] == '>'))
-                continue;
-            state++;
-        } else if (tokenEqualStr(tk, "</dict>")) {
-            state--;
-        } else if (tokenEqualStrN(tk, "<key", 4) && (state == 1)) /* if we are at the top level of the lib dict, check the key values */
-        {
-            if ((tk->val[tk->length - 2] == '/') && (tk->val[tk->length - 1] == '>')) {
-                message(h, "Warning: Encountered empty <key/>. Text: '%s'.", getBufferContextPtr(h));
-            } else {
-                // get key name
-                tk = getElementValue(h, state);
-                if (tokenEqualStr(tk, "</key>")) {
-                    message(h, "Warning: Encountered empty <key></key>. Text: '%s'.", getBufferContextPtr(h));
-                } else {
-                    if (tokenEqualStr(tk, "com.adobe.type.cid.CIDFontName")) {
-                        prevState = state;
-                        state = CIDNAME;
-                    } else if (tokenEqualStr(tk, "com.adobe.type.cid.Registry")) {
-                        prevState = state;
-                        state = REGISTRY;
-                    } else if (tokenEqualStr(tk, "com.adobe.type.cid.Ordering")) {
-                        prevState = state;
-                        state = ORDERING;
-                    } else if (tokenEqualStr(tk, "com.adobe.type.cid.Supplement")) {
-                        prevState = state;
-                        state = SUPPLEMENT;
-                    } else if (tokenEqualStr(tk, "public.glyphOrder")) {
-                        prevState = state;
-                        state = START_PUBLIC_ORDER;
-                    }
-                    // get end-key.
-                    tk = getToken(h, state);
-                    if (!tokenEqualStr(tk, "</key>")) {
-                        tk->val[tk->length - 1] = 0;
-                        fatal(h, ufoErrParse, "Encountered element other than </key> when reading <key> name: %s. Text: '%s'.", tk->val, getBufferContextPtr(h));
-                    }
-                }
-            }
-        } else if ((tokenEqualStrN(tk, "<array", 6)) && (state == START_PUBLIC_ORDER)) {
-            state = IN_PUBLIC_ORDER;
-            if ((tk->val[tk->length - 2] == '/') && (tk->val[tk->length - 1] == '>')) {
-                state = prevState;
-            }
-        } else if ((tokenEqualStr(tk, "</array>")) && (state == IN_PUBLIC_ORDER)) {
-            state = prevState;
-        } else if ((tokenEqualStrN(tk, "<string", 7)) && ((state == REGISTRY) || (state == ORDERING) || (state == CIDNAME) )) {
-            if ((tk->val[tk->length - 2] == '/') && (tk->val[tk->length - 1] == '>')) {
-                message(h, "Warning: Encountered empty <string/>. Text: '%s'.", getBufferContextPtr(h));
-            } else {
-                tk = getElementValue(h, state);
-                if (tokenEqualStr(tk, "</string>")) {
-                    message(h, "Warning: Encountered empty <string></string>. Text: '%s'.", getBufferContextPtr(h));
-                } else {
-                    if (state == CIDNAME) {
-                        top->cid.CIDFontName.ptr = copyStr(h, tk->val);
-                        state = prevState;
-                    } else if (state == REGISTRY) {
-                        top->cid.Registry.ptr = copyStr(h, tk->val);
-                        state = prevState;
-                    } else if (state == ORDERING) {
-                        top->cid.Ordering.ptr = copyStr(h, tk->val);
-                        state = prevState;
-                    }
-                    tk = getToken(h, state);
-                    if (!tokenEqualStr(tk, "</string>")) {
-                        tk->val[tk->length - 1] = 0;
-                        fatal(h, ufoErrParse, "Encountered element other than </string> when reading <string> name: %s. Text: '%s'.", tk->val, getBufferContextPtr(h));
-                    }
-                }
-            }
-        } else if ((tokenEqualStrN(tk, "<integer", 8)) && (state == SUPPLEMENT)) {
-                if ((tk->val[tk->length - 2] == '/') && (tk->val[tk->length - 1] == '>')) {
-                    message(h, "Warning: Encountered empty <integer/>. Text: '%s'.", getBufferContextPtr(h));
-                } else {
-                    tk = getElementValue(h, state);
-                    if (tokenEqualStr(tk, "</integer>")) {
-                        message(h, "Warning: Encountered empty <integer></integer>. Text: '%s'.", getBufferContextPtr(h));
-                    } else {
-                        if (state == SUPPLEMENT) {
-                            top->cid.Supplement = atol(copyStr(h, tk->val));
-                            state = prevState;
-                        }
-                        tk = getToken(h, state);
-                        if (!tokenEqualStr(tk, "</integer>")) {
-                            tk->val[tk->length - 1] = 0;
-                            fatal(h, ufoErrParse, "Encountered element other than </integer> when reading <string> name: %s. Text: '%s'.", tk->val, getBufferContextPtr(h));
-                        }
-                    }
-                }
-        } else if ((tokenEqualStrN(tk, "<string", 7)) && (state == IN_PUBLIC_ORDER)) {
-            if ((tk->val[tk->length - 2] == '/') && (tk->val[tk->length - 1] == '>')) {
-                message(h, "Warning: Encountered empty <string/> in public.glyphOrder. Text: '%s'.", getBufferContextPtr(h));
-            } else {
-                tk = getElementValue(h, state);
-                if (tokenEqualStr(tk, "</string>")) {
-                    message(h, "Warning: Encountered empty <string></string>. Text: '%s'.", getBufferContextPtr(h));
-                } else {
-                        GlIFOrderRec* newGLIFOrderRec;
-                        newGLIFOrderRec = dnaNEXT(h->data.glifOrder);
-                        newGLIFOrderRec->glyphName = copyStr(h, tk->val);  // get a copy in memory
-                        newGLIFOrderRec->order = h->data.glifOrder.cnt - 1;
-                        tk = getToken(h, state);
-                        if (!tokenEqualStr(tk, "</string>")) {
-                            tk->val[tk->length - 1] = 0;
-                            fatal(h, ufoErrParse, "Encountered element other than </string> when reading <string> name: %s. Text: '%s'.", tk->val, getBufferContextPtr(h));
-                        }
-                }
-            }
-        }
-    } /* end while more tokens */
+    int parsingSuccess = parseXMLFile(h, h->cb.stm.clientFileName, filetype);
 
     if (h->data.glifOrder.cnt > 0) {
         /* Sort the array by glyph name. */
@@ -1407,21 +1339,20 @@ static int parseGlyphOrder(ufoCtx h) {
 
     h->cb.stm.close(&h->cb.stm, h->stm.src);
     h->stm.src = NULL;
-
-    return ufoSuccess;
+    return parsingSuccess;
 }
 
 static int parseGlyphList(ufoCtx h, bool altLayer) {
-    int state = 0; /* 0 == start, 1= seen start of glyph, 2 = seen glyph name, 3 = in path, 4 in comment.  */
-    int prevState = 0;
-    h->src.next = h->mark = NULL;
+    const char* filetype = "plist";
     char *clientFilePath;
     char *plistFileName = "/contents.plist";
 
     if (altLayer) {
+        parsingContentsLayer = parsingAltLayer;
         clientFilePath = memNew(h, 2 + strlen(h->altLayerDir) + strlen(plistFileName));
         strcpy(clientFilePath, h->altLayerDir);
     } else {
+        parsingContentsLayer = parsingDefaultLayer;
         clientFilePath = memNew(h, 2 + strlen(h->defaultLayerDir) + strlen(plistFileName));
         strcpy(clientFilePath, h->defaultLayerDir);
     }
@@ -1440,60 +1371,16 @@ static int parseGlyphList(ufoCtx h, bool altLayer) {
     }
 
     dnaSET_CNT(h->valueArray, 0);
-    fillbuf(h, 0);
 
-    h->metrics.defaultWidth = 0;
-    h->flags &= ~SEEN_END;
+     int parsingSuccess = parseXMLFile(h, h->cb.stm.clientFileName, filetype);
 
-    while (!(h->flags & SEEN_END)) {
-        token* tk;
-        tk = getToken(h, state);
+    /* 'glyph order does not contain glyph name' warnings in getGlyphOrderIndex are suppressed
+        if glyphOrder count is 0 to reduce amount of warnings.
+        Instead, add one warning here.*/
+    if (h->data.glifOrder.cnt == 0)
+        message(h, "Warning: public.glyphOrder key is empty and does not contain glyph name for all %ld glyphs. Consider defining this in lib.plist.", h->data.glifRecs.cnt);
 
-        if (tokenEqualStr(tk, "<!--")) {
-            prevState = state;
-            state = 4;
-        } else if (tokenEqualStr(tk, "-->")) {
-            if (state != 4)
-                fatal(h, ufoErrParse, "Encountered end comment token while not in comment.");
-            state = prevState;
-        } else if (state == 4) {
-            continue;
-        } else if (tokenEqualStr(tk, "<dict>")) {
-            if (state > 0)
-                fatal(h, ufoErrParse, "Encountered second <dict while in first");
-            state = 1;
-        } else if (tokenEqualStr(tk, "</dict>")) {
-            h->flags |= SEEN_END;
-            break;  // end processing at end of first dict.
-        } else if (tokenEqualStr(tk, "<key>")) {
-            if (state != 1)
-                fatal(h, ufoErrParse, "Encountered <key> while not in top level of first <dict>");
-            // get key name
-            tk = getElementValue(h, state);
-            if (tokenEqualStr(tk, "</key>")) {
-                message(h, "Warning: Encountered empty <key></key>. Text: '%s'.", getBufferContextPtr(h));
-            } else {
-                h->parseKeyName = copyStr(h, tk->val);  // get a copy in memory
-                // get end-key.
-                tk = getToken(h, state);
-                if (!tokenEqualStr(tk, "</key>")) {
-                    tk->val[tk->length - 1] = 0;
-                    fatal(h, ufoErrParse, "Encountered element other than </key> when reading <key> name: %s. Text: '%s'.", tk->val, getBufferContextPtr(h));
-                }
-            }
-            state = 2;
-        } else if ((tokenEqualStr(tk, "<string>")) && (state == 2)) {
-            if (altLayer) {
-                updateGLIFRec(h, state);
-            } else {
-                addGLIFRec(h, state);
-            }
-            state = 1;
-        } else if (state != 0) {
-            message(h, "Warning: discarding token '%s", tk->val);
-        }
-    } /* end while more tokens */
-
+    /* process the glyph order layers */
     if (!altLayer) {
         if (h->data.glifOrder.cnt > 0) {
             ctuQSort(h->data.glifRecs.array, h->data.glifRecs.cnt,
@@ -1511,6 +1398,7 @@ static int parseGlyphList(ufoCtx h, bool altLayer) {
 
     h->cb.stm.close(&h->cb.stm, h->stm.src);
     h->stm.src = NULL;
+    parsingContentsLayer = None;
 
     memFree(h, clientFilePath);
     return ufoSuccess;
@@ -1819,165 +1707,164 @@ static void reallocFDArray(ufoCtx h){
     h->top.FDArray.array = newFDArray;
 }
 
+static int parseXMLFile(ufoCtx h, char* filename, const char* filetype){
+    xmlDocPtr doc;
+    xmlNodePtr cur;
+    char* keyName;
+
+    xmlKeepBlanksDefault(0);
+
+    h->cb.stm.xml_read(&h->cb.stm, h->stm.src, &doc);
+
+    if (doc == NULL) {
+        fatal(h, ufoErrParse, "Unable to read '%s'.\n", filename);
+    }
+
+    cur = xmlDocGetRootElement(doc);
+    if (cur == NULL) {
+        xmlFreeDoc(doc);
+        fatal(h, ufoErrSrcStream, "The %s file is empty.\n", filename);
+    }
+
+    if (!xmlStrEqual((cur)->name, (const xmlChar *) filetype)) {
+        xmlFreeDoc(doc);
+        fatal(h, ufoErrSrcStream, "File %s is of the wrong type, root node != %s.\n", filename, filetype);
+    }
+
+    cur = (cur)->xmlChildrenNode;
+    while (cur && xmlIsBlankNode(cur)) {
+        cur = (cur) -> next;
+    }
+
+    if ( cur == NULL ) {
+        xmlFreeDoc(doc);
+        fatal(h, ufoErrSrcStream, "Error parsing XML file %s.\n", filename);
+    }
+
+    if ((!xmlStrEqual((cur)->name, (const xmlChar *) "dict"))) {
+        xmlFreeDoc(doc);
+        fatal(h, ufoErrSrcStream, "Error reading outermost <dict> in %s.\n", filename);
+    }
+
+    cur = cur->xmlChildrenNode;
+    while (cur != NULL) {
+        keyName = parseXMLKeyName(h, cur);
+        cur = cur->next;
+        if (setFontDictKey(h, keyName, cur) && cur != NULL)
+           cur = cur->next;
+    }
+    return ufoSuccess;
+}
+
+/* ToDo: add extra warnings for verbose-output*/
+static char* parseXMLKeyName(ufoCtx h, xmlNodePtr cur){
+    if ((xmlStrEqual(cur->name, (const xmlChar *) "key"))) {
+        cur = cur->xmlChildrenNode;
+        if (cur != NULL) {
+            if (xmlStrEqual(cur->name, (const xmlChar *) "text")) {
+                return (char*) xmlNodeGetContent(cur);
+            } else {
+//                message(h, "Warning: Encountered non-text value %s within <key>.", cur->name);
+                return NULL;
+            }
+        } else {
+//            message(h, "Warning: Encountered empty <key></key>.");
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+static void parseXMLArray(ufoCtx h, xmlNodePtr cur){
+    dnaSET_CNT(h->valueArray, 0);
+    parsingValueArray = true;
+    cur = cur->xmlChildrenNode;
+    while (cur != NULL) {
+        char* valueString = parseXMLKeyValue(h, cur);
+        if (valueString != NULL)
+            *dnaNEXT(h->valueArray) = valueString;
+        cur = cur->next;
+    }
+}
+
+static void parseXMLDict(ufoCtx h, xmlNodePtr cur){
+    // go through an XML dict
+    char* keyName;
+    cur = cur->xmlChildrenNode;
+
+    if (parsingFDArray){
+        currentiFD = currentiFD + 1;
+        h->top.FDArray.cnt = h->top.FDArray.cnt + 1;
+        if (h->top.FDArray.cnt > FDArrayInitSize){ /* Memory needs reallocation*/
+            reallocFDArray(h);
+        }
+        abfFontDict* fd = h->top.FDArray.array + currentiFD;
+        abfInitFontDict(fd);
+    }
+
+    while (cur != NULL) {
+        char* keyName = parseXMLKeyName(h, cur);
+        cur = cur->next;
+        if (setFontDictKey(h, keyName, cur) && cur != NULL)
+            cur = cur->next;
+    }
+}
+
+static bool isSimpleKey(xmlNodePtr cur){
+    if (xmlStrEqual(cur->name, (const xmlChar *) "string" ) ||
+        xmlStrEqual(cur->name, (const xmlChar *) "integer") ||
+        xmlStrEqual(cur->name, (const xmlChar *) "real")    ||
+        xmlStrEqual(cur->name, (const xmlChar *) "date")) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+static char* parseXMLKeyValue(ufoCtx h, xmlNodePtr cur){
+    if (cur == NULL) {
+        return NULL;
+    }
+    if (isSimpleKey(cur)) {  /* if string, integer, or real */
+        return (char*) xmlNodeGetContent(cur);
+    } else if (parsingContentsLayer == parsingDefaultLayer || parsingContentsLayer == parsingAltLayer) {
+        return NULL; /* Only simple keys allowed when parsing contents.plist*/
+    } else if (xmlStrEqual(cur->name, (const xmlChar *) "dict")) {
+        parseXMLDict(h, cur);
+        return NULL;
+    } else if (xmlStrEqual(cur->name, (const xmlChar *) "array")) {
+        parseXMLArray(h, cur);
+        return NULL;  // returning NULL because value is in h->valueArray
+    }  else if (xmlStrEqual(cur->name, (const xmlChar *) "true")) {
+        return "1";
+    }  else if (xmlStrEqual(cur->name, (const xmlChar *) "false")) {
+        return "0";
+    } else {
+        return NULL;
+    }
+}
+
 static int parseFontInfo(ufoCtx h) {
-    int state = 0;     /* 0 == start, 1=in first dict, 2 in key, 3= in value, 4=in array 4 in comment, 5 in child dict.*/
-    int prevState = 0; /* used to save prev state while in comment. */
+    const char* filetype = "plist";
+    currentiFD = 0;
+
     h->src.next = h->mark = NULL;
     h->cb.stm.clientFileName = "fontinfo.plist";
     h->stm.src = h->cb.stm.open(&h->cb.stm, UFO_SRC_STREAM_ID, 0);
     if (h->stm.src == NULL || h->cb.stm.seek(&h->cb.stm, h->stm.src, 0)) {
-        message(h, "Warning: Failed to open fontinfo.plist in source UFO font. No PostScript FontDict values are specified. \n");
+        message(h, "Warning: Unable to open fontinfo.plist in source UFO font. No PostScript FontDict values are specified. \n");
         fixUnsetDictValues(h);
         return ufoSuccess;
     }
 
     dnaSET_CNT(h->valueArray, 0);
-    fillbuf(h, 0);
 
-    h->flags &= ~((unsigned long)SEEN_END);
+    int parsingSuccess = parseXMLFile(h, h->cb.stm.clientFileName, filetype);
 
-    while (!(h->flags & SEEN_END)) {
-        token* tk;
-        tk = getToken(h, state);
-
-        if (tokenEqualStr(tk, "<!--")) {
-            prevState = state;
-            state = 4;
-        } else if (tokenEqualStr(tk, "-->")) {
-            if (state != 4) {
-                fatal(h, ufoErrParse, "Encountered end comment token while not in comment, in fontinfo.plist file. Context: '%s'.\n", getBufferContextPtr(h));
-            }
-            state = prevState;
-        } else if (state == 4) {
-            continue;
-        } else if (tokenEqualStr(tk, "<dict>")) {
-            if (state == 3){
-                state = 5;
-                if (parsingFDArray){
-                    if (prevState == 5) {  // NOT first fdict in FDArray
-                        currentiFD = currentiFD + 1;
-                        h->top.FDArray.cnt = h->top.FDArray.cnt + 1;
-                        if (h->top.FDArray.cnt > FDArrayInitSize){ /* Memory needs reallocation*/
-                            reallocFDArray(h);
-                        }
-                        abfFontDict* fd = h->top.FDArray.array + currentiFD;
-                        abfInitFontDict(fd);
-                    } else {
-                        h->top.FDArray.array = memNew(h, FDArrayInitSize *sizeof(abfFontDict));
-                        if (h->top.version.ptr != NULL)
-                            h->top.cid.CIDFontVersion = atoi(h->top.version.ptr) % 10 + (float) atoi(&h->top.version.ptr[2])/1000;
-                        abfInitFontDict(h->top.FDArray.array);
-                    }
-                }
-            }else if (state == 5){
-                state = 6;
-            }else{
-                state = 1;
-            }
-        } else if (tokenEqualStr(tk, "</dict>")) {
-            if (state == 6){
-                state = 5;
-            } else if (state == 5){
-                prevState = state;
-                state = 3;
-            } else{
-                break;
-            }
-        } else if (tokenEqualStr(tk, "<key>")) {
-            if (state != 1 && state < 5) {
-                fatal(h, ufoErrParse, "Encountered '<key>' while not in top level of first <dict>, in fontinfo.plist file. Context: '%s'.\n", getBufferContextPtr(h));
-            }
-            // get key name
-            tk = getElementValue(h, state);
-            if (tokenEqualStr(tk, "</key>")) {
-                message(h, "Warning: Encountered empty <key></key>. Text: '%s'.", getBufferContextPtr(h));
-            } else {
-                h->parseKeyName = copyStr(h, tk->val);  // get a copy in memory. This is freed when the value is assigned.
-                // get end-key.
-                tk = getToken(h, state);
-                if (!tokenEqualStr(tk, "</key>")) {
-                    tk->val[tk->length - 1] = 0;
-                    fatal(h, ufoErrParse, "Encountered element other than </key> when reading <key> name: %s, in fontinfo.plist file. Context: '%s'.\n", tk->val, getBufferContextPtr(h));
-                }
-            }
-            if (state != 5 && state != 6){
-                state = 2;
-            }
-        } else if (tokenEqualStr(tk, "<array>")) {
-            if (state != 2 && state < 5) {
-                fatal(h, ufoErrParse, "Encountered <array> when not after <key> element, in fontinfo.plist file. Context: '%s'.\n", getBufferContextPtr(h));
-            } else {
-                /* check if parsing FDArray */
-                if (!strcmp(h->parseKeyName, "postscriptFDArray"))
-                    parsingFDArray = true;
-                if (state >= 5){
-                    prevState = state;
-                }
-                state = 3;
-            }
-            dnaSET_CNT(h->valueArray, 0);
-        } else if (tokenEqualStr(tk, "</array>")) {
-            if (state == 5) {
-                if (parsingFDArray)
-                    parsingFDArray = false;
-                if ( h->top.FDArray.array != &h->fdict ) {  // if more memory was allocated for FDArray
-                    memFree(h, h->top.FDArray.array);
-                }
-                state = 1;
-            } else if (state != 3) {
-                fatal(h, ufoErrParse, "Encountered </array> when not after <array> element, in fontinfo.plist file. Context: '%s'.\n", getBufferContextPtr(h));
-            } else {
-                if (h->parseKeyName == NULL)
-                    break;
-                setFontDictKey(h, NULL);
-                if (prevState >= 5){
-                    state = prevState;
-                }else{
-                    state = 1;
-                }
-            }
-        } else if (tokenEqualStr(tk, "<array/>")) {
-            if (state != 2 && state != 5) {
-                fatal(h, ufoErrParse, "Encountered <array/> when not after <key> element, in fontinfo.plist file. Context: '%s'.\n", getBufferContextPtr(h));
-            } else {
-                dnaSET_CNT(h->valueArray, 0);
-                setFontDictKey(h, NULL);
-                state = 1;
-            }
-        } else if (tokenEqualStr(tk, "<string>")) {
-            state = doFontDictValue(h, "<string>", "</string>", state);
-        } else if (tokenEqualStr(tk, "<real>")) {
-            state = doFontDictValue(h, "<real>", "</real>", state);
-        } else if (tokenEqualStr(tk, "<integer>")) {
-            state = doFontDictValue(h, "<integer>", "</integer>", state);
-        } else if (tokenEqualStr(tk, "<date>")) {
-            state = doFontDictValue(h, "<date>", "</date>", state);
-        } else if (tokenEqualStr(tk, "<data>")) {
-            message(h, "Warning: encountered <data> element: skipping.");
-        } else if (tokenEqualStr(tk, "<false/>")) {
-            setFontDictKey(h, "0");
-            state--;
-        } else if (tokenEqualStr(tk, "<true/>")) {
-            setFontDictKey(h, "1");
-            state--;
-        } else if (state != 0) {
-            tk->val[tk->length - 1] = 0;
-            message(h, "Warning: discarding token '%s', in fontinfo.plist file. Context: '%s'.", tk->val, getBufferContextPtr(h));
-            if (state == 2)
-                state = 1;
-            else if (state == 3)
-                state = 2;
-        }
-    } /* end while more tokens */
-
-    /* Currently, proscriptStdHW and postscriptStdVW have to be hand-edited in. If they haven't been provided,
-     use the first value of the stemsnap entries.
-    */
     fixUnsetDictValues(h);
-
     h->cb.stm.close(&h->cb.stm, h->stm.src);
     h->stm.src = NULL;
-    return ufoSuccess;
+    return parsingSuccess;
 }
 
 static int parseUFO(ufoCtx h) {

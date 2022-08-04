@@ -641,6 +641,10 @@ def test_delete_zero_kb_font_on_fail_bug736():
 
 
 def test_duplicate_warning_messages_bug751():
+    """
+    These warning messages have been temporarily removed.
+    We'll add them back once we add a verbose option.
+    """
     input_filename = 'bug751.ufo'
     expected_path = get_expected_path('bug751.txt')
     otf_path = get_temp_file_path()
@@ -650,7 +654,7 @@ def test_duplicate_warning_messages_bug751():
                'f', f'_{get_input_path(input_filename)}',
                'o', f'_{otf_path}'])
 
-    assert differ([expected_path, stderr_path, '-l', '1',
+    assert differ([expected_path, stderr_path,
                    '-s', 'Built development mode font'])
 
 
@@ -702,3 +706,43 @@ def test_check_psname_in_fmndb_bug1171(explicit_fmndb):
     assert differ([expected_ttx, actual_ttx,
                    '-s', '<ttFont sfntVersion',
                    '-r', r'^\s+Version.*;hotconv.*;makeotfexe'])
+
+
+libplist_warn = (b"tx: (ufr) Warning: Unable to open "
+                 b"lib.plist in source UFO font.")
+
+
+@pytest.mark.parametrize('file, msg, ret_code', [
+    ("missing-libplist-namekeyed", libplist_warn, 0),
+    ("missing-libplist-cidkeyed", libplist_warn, 0),
+    ("missing-libplist-cidkeyed-cid-identifiers", None, 2)
+])
+def test_missing_ufo_libplist_bug1306(file, msg, ret_code):
+    """
+    if reading namekeyed or cidkeyed UFO:
+        tx should not fail if optional lib.plist is not found.
+        Instead, warn the user.
+    if reading cidkeyed UFO with cid identifiers in glyphs:
+        tx later fails as it expects values for
+        Registry, Ordering, Supplement and CIDFontName keys,
+        which should be defined in lib.plist
+    """
+    folder = "ufo-libplist-parsing/"
+    input_path = get_input_path(folder + file + ".ufo")
+    out_font_path = get_temp_file_path()
+    args = CMD + ['-s', '-e', '-o',
+                  'f', f'_{input_path}',
+                  'o', f'_{out_font_path}']
+    stdout_path = runner(args)
+    with open(stdout_path, 'rb') as f:
+        output = f.read()
+
+    if msg is None:
+        # msg is in a file in expected_output
+        expected_path = get_expected_path(file + ".txt")
+        with open(expected_path, 'rb') as expected_msg:
+            msg = expected_msg.read()
+    assert msg in output
+
+    assert subprocess.call([TOOL, '-f', input_path,
+                            '-o', out_font_path]) == ret_code

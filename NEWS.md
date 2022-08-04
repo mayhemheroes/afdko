@@ -1,6 +1,18 @@
 Changelog
 =========
 
+3.9.1 (released 2022-07-01)
+---------------------------
+- [CMake] Link LibXML2 statically for Linux for bug fix ([#1527](https://github.com/adobe-type-tools/afdko/pull/1527))
+- [makeotf][tx] Fix some linux compile problems with "bool" ([#1524](https://github.com/adobe-type-tools/afdko/pull/1524))
+- [tx] Replace UFO lib.plist parsing with libxml2 ([#1523](https://github.com/adobe-type-tools/afdko/pull/1523))
+
+3.9.0 (released 2022-06-23)
+---------------------------
+- [tx] Replace UFO fontinfo.plist parsing with libxml2 ([#1515](https://github.com/adobe-type-tools/afdko/pull/1515), [#1517](https://github.com/adobe-type-tools/afdko/pull/1517), [#1518](https://github.com/adobe-type-tools/afdko/pull/1518), [#1519](https://github.com/adobe-type-tools/afdko/pull/1519))
+- [makeotf] Copy va_list for second use (and add va_end's to avoid leaking) ([#1512](https://github.com/adobe-type-tools/afdko/pull/1512))
+- [requirements] updated dependencies
+
 3.8.3 (released 2022-05-09)
 ---------------------------
 - [requirements] updated dependencies
