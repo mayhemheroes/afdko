@@ -1,0 +1,5 @@
+project: afdko
+target: ctustrtod
+
+cmds:
+  - cmd: /fuzz_ctuStrtod
