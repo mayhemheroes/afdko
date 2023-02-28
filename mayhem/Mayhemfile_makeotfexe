@@ -1,0 +1,5 @@
+project: afdko
+target: makeotfexe
+
+cmds:
+  - cmd: /makeotfexe -f @@
